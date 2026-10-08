@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CallPrior – Control Room</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .call-queue { max-height: calc(100vh - 220px); overflow-y: auto; }
+    .call-card { padding: 10px 12px; border-bottom: 1px solid #2c2c38; cursor: pointer; transition: background .15s; color: var(--text); }
+    .call-card:hover { background: #22222c; }
+    .call-card.sla-breach { border-left: 3px solid #ff3b3b; }
+    .call-card .small, .call-card small { color: var(--text) !important; }
+    .call-card .muted, .call-card .small.muted { color: var(--muted) !important; }
+    .priority-badge { font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 20px; }
+    .p-CRITICAL { background: #ff3b3b; color: #fff !important; }
+    .p-HIGH     { background: #ff8a00; color: #111 !important; }
+    .p-MEDIUM   { background: #ffd400; color: #111 !important; }
+    .p-LOW      { background: #5bd18a; color: #111 !important; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+    .dot-waiting  { background: #ffd400; }
+    .dot-assigned { background: #2d7ff9; }
+    .dot-closed   { background: #6c757d; }
+    #cr-map { height: calc(100vh - 130px); border-radius: 12px; border: 1px solid #2c2c38; }
+    .sla-timer { font-size: .7rem; color: #ff3b3b !important; font-weight: 700; }
+    .flag-chip { background:#2c2c38; border-radius:10px; padding:1px 7px; font-size:.68rem; color:#ffd400 !important; }
+    #cr-toolbar { background: #1a1a22; border-bottom: 2px solid var(--accent); padding: 6px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; color: var(--text); }
+    .cr-kpi { background:#0e0e12; border:1px solid #2c2c38; border-radius:8px; padding:6px 14px; text-align:center; min-width:90px; }
+    .cr-kpi .num { font-size:1.4rem; font-weight:800; color:var(--accent2) !important; line-height:1; }
+    .cr-kpi .lbl { font-size:.65rem; color:var(--muted) !important; text-transform:uppercase; }
+    .new-badge { background:#ff3b3b; color:#fff !important; border-radius:50%; width:16px; height:16px; font-size:.65rem; font-weight:800; display:inline-flex; align-items:center; justify-content:center; }
+    /* Intake modal inner text */
+    #intakeModal .modal-body label,
+    #intakeModal .modal-body .form-check-label { color: var(--text) !important; }
+    #intakeModal .modal-body .form-check-label { font-size: .875rem; }
+    /* Call detail modal table */
+    #callModal th { color: var(--muted) !important; font-size: .8rem; white-space: nowrap; }
+    #callModal td { color: var(--text) !important; }
+    /* fw-bold inside call cards */
+    .call-card .fw-bold { color: var(--text) !important; }
+    /* text-truncate description */
+    .call-card .text-truncate { color: var(--text) !important; }
+  </style>
+</head>
+<body>
+<div id="nav"></div>
+
+<!-- Top toolbar with KPIs -->
+<div id="cr-toolbar">
+  <span style="font-weight:800;color:var(--accent2);font-size:1rem;">📞 CALLPRIOR</span>
+  <div class="cr-kpi"><div class="num" id="kpi-waiting">—</div><div class="lbl">Waiting</div></div>
+  <div class="cr-kpi"><div class="num" id="kpi-assigned">—</div><div class="lbl">Assigned</div></div>
+  <div class="cr-kpi"><div class="num" id="kpi-critical">—</div><div class="lbl">Critical</div></div>
+  <div class="cr-kpi"><div class="num" id="kpi-breaches">—</div><div class="lbl">SLA Breaches</div></div>
+  <div class="cr-kpi"><div class="num" id="kpi-units-avail">—</div><div class="lbl">Units Free</div></div>
+  <div class="ms-auto d-flex gap-2 flex-wrap">
+    <button class="btn btn-sm btn-outline-warning" id="btn-simulate">🔊 Simulate IVR Call</button>
+    <button class="btn btn-sm btn-accent" data-bs-toggle="modal" data-bs-target="#intakeModal">+ New Call</button>
+  </div>
+</div>
+
+<div class="container-fluid p-2" style="height: calc(100vh - 108px)">
+  <div class="row g-2 h-100">
+
+    <!-- Left: priority queue -->
+    <div class="col-lg-5 col-xl-4 d-flex flex-column h-100">
+      <div class="card-dark flex-fill d-flex flex-column" style="min-height:0">
+        <div class="p-2 px-3 fw-bold border-bottom border-secondary d-flex align-items-center gap-2">
+          Priority Queue
+          <select id="f-status" class="form-select form-select-sm w-auto ms-auto" style="font-size:.8rem">
+            <option value="">All</option>
+            <option value="waiting">Waiting</option>
+            <option value="assigned">Assigned</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+        <div class="call-queue flex-fill" id="call-list">
+          <div class="p-3 muted">Loading calls...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: map -->
+    <div class="col-lg-7 col-xl-8 h-100">
+      <div id="cr-map"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Call Detail Modal (assign / close) -->
+<div class="modal fade" id="callModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content intake-modal">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="callModalTitle">Call Detail</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="callModalBody"></div>
+      <div class="modal-footer border-secondary" id="callModalFooter"></div>
+    </div>
+  </div>
+</div>
+
+<!-- New Call Intake Modal -->
+<div class="modal fade" id="intakeModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content intake-modal">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">📞 New Emergency Call Intake</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label small">Caller Name</label>
+            <input id="i-name" class="form-control" placeholder="Caller name">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Caller Phone</label>
+            <input id="i-phone" class="form-control" placeholder="+91 XXXXX XXXXX">
+          </div>
+          <div class="col-12">
+            <label class="form-label small">Incident Description <span class="text-danger">*</span></label>
+            <textarea id="i-desc" class="form-control" rows="3" placeholder="Describe the emergency as reported by the caller..."></textarea>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Location Text</label>
+            <input id="i-loc" class="form-control" placeholder="Street / landmark">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Incident Type</label>
+            <select id="i-type" class="form-select">
+              <option value="">Auto-detect</option>
+              <option>flood</option><option>fire</option><option>medical</option>
+              <option>accident</option><option>earthquake</option><option>cyclone</option>
+              <option>landslide</option><option>infrastructure</option><option>other</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Severity (1-5)</label>
+            <input id="i-sev" type="number" min="1" max="5" value="" class="form-control" placeholder="Auto">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Latitude</label>
+            <input id="i-lat" type="number" step="any" class="form-control" placeholder="8.7139">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Longitude</label>
+            <input id="i-lng" type="number" step="any" class="form-control" placeholder="77.7567">
+          </div>
+          <div class="col-12">
+            <label class="form-label small">Urgency Flags (check all that apply)</label>
+            <div class="d-flex flex-wrap gap-2">
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="trapped" id="f-trapped"><label class="form-check-label small" for="f-trapped">Trapped</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="unconscious" id="f-unconscious"><label class="form-check-label small" for="f-unconscious">Unconscious</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="bleeding" id="f-bleeding"><label class="form-check-label small" for="f-bleeding">Bleeding</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="pregnant" id="f-pregnant"><label class="form-check-label small" for="f-pregnant">Pregnant</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="child" id="f-child"><label class="form-check-label small" for="f-child">Child/Infant</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="elderly" id="f-elderly"><label class="form-check-label small" for="f-elderly">Elderly</label></div>
+              <div class="form-check"><input class="form-check-input flag-cb" type="checkbox" value="disabled" id="f-disabled"><label class="form-check-label small" for="f-disabled">Disabled</label></div>
+            </div>
+          </div>
+          <div class="col-12"><div id="intake-msg" class="small"></div></div>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-accent" id="btn-intake-submit">Log Call</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="js/api.js"></script>
+<script>
+navbar("controlroom.html");
+
+// -------- Map init --------
+let map, callLayer, unitLayer;
+let mapCenter = [8.7139, 77.7567];
+const callMarkers = {};
+
+function initMap() {
+  map = L.map("cr-map").setView(mapCenter, 12);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+  callLayer = L.layerGroup().addTo(map);
+  unitLayer = L.layerGroup().addTo(map);
+}
+
+function callIcon(label, status) {
+  const colors = { CRITICAL: "#ff3b3b", HIGH: "#ff8a00", MEDIUM: "#ffd400", LOW: "#5bd18a" };
+  const col = status === "closed" ? "#6c757d" : (colors[label] || "#ffd400");
+  const pulse = label === "CRITICAL" && status === "waiting";
+  return L.divIcon({
+    className: "",
+    html: `<div class="${pulse ? "pulse" : ""}" style="background:${col};width:24px;height:24px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;color:${col==='#ffd400'||col==='#5bd18a'?'#111':'#fff'}">📞</div>`,
+    iconSize: [24, 24], iconAnchor: [12, 12]
+  });
+}
+
+const UNIT_ICONS = {
+  ambulance:    { emoji: "🚑", bg: "#ff3b3b" },
+  fire_tender:  { emoji: "🚒", bg: "#ff8a00" },
+  rescue_boat:  { emoji: "⛵", bg: "#2d7ff9" },
+  rescue_team:  { emoji: "🦺", bg: "#a855f7" },
+  police:       { emoji: "🚔", bg: "#22c55e" },
+};
+
+function unitIcon(u) {
+  const ic = UNIT_ICONS[u.type] || { emoji: "🚗", bg: "#888" };
+  const opacity = u.status === "offline" ? "0.4" : "1";
+  const border = u.status === "busy" ? "#ff3b3b" : "#fff";
+  return L.divIcon({
+    className: "",
+    html: `<div style="background:${ic.bg};opacity:${opacity};width:28px;height:28px;border-radius:6px;border:2px solid ${border};display:flex;align-items:center;justify-content:center;font-size:14px;" title="${esc(u.name)}">${ic.emoji}</div>`,
+    iconSize: [28, 28], iconAnchor: [14, 14]
+  });
+}
+
+// -------- Data loading --------
+let allCalls = [], allUnits = [];
+
+async function loadAll() {
+  const status = document.getElementById("f-status").value;
+  const qs = status ? "?status=" + status : "";
+  [allCalls, allUnits] = await Promise.all([
+    getJSON("/calls" + qs),
+    getJSON("/units")
+  ]);
+  renderQueue(allCalls);
+  renderMap(allCalls, allUnits);
+  updateKPIs();
+}
+
+function updateKPIs() {
+  const waiting = allCalls.filter(c => c.status === "waiting");
+  const assigned = allCalls.filter(c => c.status === "assigned");
+  const critical = waiting.filter(c => c.priority_label === "CRITICAL" || c.priority_label === "HIGH");
+  const breaches = allCalls.filter(c => c.sla_breached);
+  const unitsAvail = allUnits.filter(u => u.status === "available");
+  document.getElementById("kpi-waiting").textContent = waiting.length;
+  document.getElementById("kpi-assigned").textContent = assigned.length;
+  document.getElementById("kpi-critical").textContent = critical.length;
+  document.getElementById("kpi-breaches").textContent = breaches.length;
+  document.getElementById("kpi-units-avail").textContent = unitsAvail.length;
+}
+
+function renderQueue(calls) {
+  const el = document.getElementById("call-list");
+  if (!calls.length) { el.innerHTML = '<div class="p-3 muted">No calls in queue.</div>'; return; }
+  el.innerHTML = calls.map(c => {
+    const breachBadge = c.sla_breached ? `<span class="sla-timer">⚠ SLA BREACH</span>` : "";
+    const waitStr = c.status === "waiting" ? formatWait(c.wait_seconds) : "";
+    const flags = (c.flags || []).map(f => `<span class="flag-chip">${esc(f)}</span>`).join(" ");
+    const unitBadge = c.assigned_unit_name ? `<span class="badge text-bg-info ms-1">${esc(c.assigned_unit_name)}</span>` : "";
+    return `
+    <div class="call-card ${c.sla_breached ? "sla-breach" : ""}" data-id="${c.id}">
+      <div class="d-flex justify-content-between align-items-center">
+        <div>
+          <span class="status-dot dot-${c.status}"></span>
+          <span class="priority-badge p-${c.priority_label}">${c.priority_label}</span>
+          <span class="ms-1 fw-bold text-capitalize small">${esc(c.incident_type)}</span>
+          ${unitBadge}
+        </div>
+        <div class="text-end">
+          ${breachBadge}
+          <span class="muted small ms-2">${timeAgo(c.created_at)}</span>
+        </div>
+      </div>
+      <div class="small mt-1 text-truncate" style="max-width:100%">${esc(c.caller_name)} ${c.caller_phone ? "· " + esc(c.caller_phone) : ""}</div>
+      <div class="small muted mt-1">${esc((c.description || "").slice(0, 90))}${(c.description||"").length > 90 ? "…" : ""}</div>
+      <div class="d-flex flex-wrap gap-1 mt-1 align-items-center">
+        ${flags}
+        ${waitStr ? `<span class="muted small ms-auto">⏱ ${waitStr}</span>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function formatWait(s) {
+  if (!s) return "just now";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+
+function renderMap(calls, units) {
+  callLayer.clearLayers();
+  unitLayer.clearLayers();
+
+  calls.forEach(c => {
+    if (!c.lat || !c.lng) return;
+    const m = L.marker([c.lat, c.lng], { icon: callIcon(c.priority_label, c.status) });
+    m.bindPopup(`
+      <b>${esc(c.incident_type.toUpperCase())}</b> – <span style="color:${c.sla_breached?'#ff3b3b':'inherit'}">${esc(c.priority_label)}</span><br>
+      <small>${esc(c.caller_name)} ${c.caller_phone ? "· " + esc(c.caller_phone) : ""}</small><br>
+      ${esc(c.description)}<br>
+      <small>Status: ${esc(c.status)} | Score: ${c.priority_score}</small>
+      ${c.sla_breached ? "<br><b style='color:#ff3b3b'>⚠ SLA BREACHED</b>" : ""}
+    `);
+    m.addTo(callLayer);
+    callMarkers[c.id] = m;
+  });
+
+  units.forEach(u => {
+    if (!u.lat || !u.lng) return;
+    const m = L.marker([u.lat, u.lng], { icon: unitIcon(u) });
+    m.bindPopup(`<b>${esc(u.name)}</b><br>Type: ${esc(u.type)}<br>Status: <b>${esc(u.status)}</b>${u.current_call_summary ? "<br>On call: " + esc(u.current_call_summary) : ""}`);
+    m.addTo(unitLayer);
+  });
+}
+
+// -------- Call detail modal --------
+document.getElementById("call-list").addEventListener("click", async (e) => {
+  const card = e.target.closest(".call-card");
+  if (!card) return;
+  const id = parseInt(card.dataset.id);
+  // pan map
+  const m = callMarkers[id];
+  if (m) { map.setView(m.getLatLng(), 15); m.openPopup(); }
+  // show modal
+  try {
+    const call = await getJSON("/calls/" + id);
+    const units = await getJSON("/calls/" + id + "/suggest-units");
+    showCallModal(call, units);
+  } catch (e) { alert("Error: " + e.message); }
+});
+
+function showCallModal(call, suggestData) {
+  const modal = new bootstrap.Modal(document.getElementById("callModal"));
+  document.getElementById("callModalTitle").innerHTML =
+    `Call #${call.id} – <span class="priority-badge p-${call.priority_label}">${call.priority_label}</span>
+     ${call.sla_breached ? '<span class="sla-timer ms-2">⚠ SLA BREACHED</span>' : ""}`;
+
+  const flags = (call.flags || []).map(f => `<span class="flag-chip">${esc(f)}</span>`).join(" ");
+  const unitOpts = suggestData.units.slice(0, 5).map(u =>
+    `<option value="${u.unit_id}">${esc(u.name)} (${esc(u.type)}) – ${u.distance_km} km, ETA ${u.eta_minutes} min${u.type_match ? " ★" : ""}</option>`
+  ).join("");
+
+  document.getElementById("callModalBody").innerHTML = `
+    <div class="row g-3">
+      <div class="col-md-6">
+        <table class="table table-sm table-dark mb-0">
+          <tr><th>Caller</th><td>${esc(call.caller_name)}</td></tr>
+          <tr><th>Phone</th><td>${esc(call.caller_phone || "—")}</td></tr>
+          <tr><th>Location</th><td>${esc(call.location_text || "—")}</td></tr>
+          <tr><th>Type</th><td class="text-capitalize">${esc(call.incident_type)}</td></tr>
+          <tr><th>Severity</th><td>${call.severity}/5</td></tr>
+          <tr><th>Status</th><td>${esc(call.status)}</td></tr>
+          <tr><th>Priority Score</th><td>${call.priority_score}</td></tr>
+          <tr><th>SLA</th><td>${call.sla_seconds}s ${call.sla_breached ? '<b style="color:#ff3b3b">BREACHED</b>' : '✓'}</td></tr>
+          <tr><th>Source</th><td>${esc(call.source)}</td></tr>
+          <tr><th>Received</th><td>${timeAgo(call.created_at)}</td></tr>
+          ${call.assigned_unit_name ? `<tr><th>Assigned Unit</th><td>${esc(call.assigned_unit_name)}</td></tr>` : ""}
+        </table>
+      </div>
+      <div class="col-md-6">
+        <div class="mb-2"><b>Description:</b><br><span class="muted small">${esc(call.description)}</span></div>
+        ${flags ? `<div class="mb-2"><b>Flags:</b> ${flags}</div>` : ""}
+        ${call.ai_summary ? `<div class="mb-1"><b>AI Summary:</b> <span class="muted small">${esc(call.ai_summary)}</span></div>` : ""}
+        ${call.ai_action ? `<div class="mb-2"><b>AI Action:</b> <span class="muted small">${esc(call.ai_action)}</span></div>` : ""}
+        ${call.status === "waiting" && suggestData.units.length ? `
+          <div class="mb-1"><b>Assign Unit:</b></div>
+          <select class="form-select form-select-sm mb-2" id="unit-select">
+            <option value="">Auto-select best unit</option>
+            ${unitOpts}
+          </select>` : ""}
+      </div>
+    </div>`;
+
+  const footer = document.getElementById("callModalFooter");
+  footer.innerHTML = "";
+  const dismiss = `<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>`;
+  if (call.status === "waiting") {
+    footer.innerHTML = dismiss + `<button class="btn btn-primary" id="btn-assign-modal">Assign Unit</button>`;
+    footer.querySelector("#btn-assign-modal").onclick = async () => {
+      const uid = document.getElementById("unit-select")?.value;
+      try {
+        await sendJSON("/calls/" + call.id + "/assign", { unit_id: uid ? parseInt(uid) : null });
+        modal.hide(); loadAll();
+      } catch (e) { alert(e.message); }
+    };
+  } else if (call.status === "assigned") {
+    footer.innerHTML = dismiss + `<button class="btn btn-success" id="btn-close-modal">Close Incident</button>`;
+    footer.querySelector("#btn-close-modal").onclick = async () => {
+      try {
+        await sendJSON("/calls/" + call.id + "/close", {});
+        modal.hide(); loadAll();
+      } catch (e) { alert(e.message); }
+    };
+  } else {
+    footer.innerHTML = dismiss;
+  }
+  modal.show();
+}
+
+// -------- New call intake --------
+document.getElementById("btn-intake-submit").onclick = async () => {
+  const desc = document.getElementById("i-desc").value.trim();
+  const latVal = parseFloat(document.getElementById("i-lat").value) || mapCenter[0];
+  const lngVal = parseFloat(document.getElementById("i-lng").value) || mapCenter[1];
+  const sevVal = parseInt(document.getElementById("i-sev").value) || undefined;
+  const typeVal = document.getElementById("i-type").value || undefined;
+  const flags = [...document.querySelectorAll(".flag-cb:checked")].map(cb => cb.value);
+  const msg = document.getElementById("intake-msg");
+
+  if (desc.length < 3) { msg.className = "small text-danger"; msg.textContent = "Please enter a description."; return; }
+
+  document.getElementById("btn-intake-submit").disabled = true;
+  msg.className = "small muted"; msg.textContent = "Logging call...";
+  try {
+    await sendJSON("/calls", {
+      caller_name: document.getElementById("i-name").value.trim() || "Unknown",
+      caller_phone: document.getElementById("i-phone").value.trim() || null,
+      location_text: document.getElementById("i-loc").value.trim() || null,
+      lat: latVal, lng: lngVal, description: desc,
+      incident_type: typeVal || null, severity: sevVal || null, flags,
+      source: "operator"
+    });
+    msg.className = "small text-success"; msg.textContent = "Call logged successfully.";
+    // reset form
+    ["i-name","i-phone","i-desc","i-loc","i-lat","i-lng","i-sev"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("i-type").value = "";
+    document.querySelectorAll(".flag-cb").forEach(cb => cb.checked = false);
+    loadAll();
+  } catch (e) { msg.className = "small text-danger"; msg.textContent = "Error: " + e.message; }
+  document.getElementById("btn-intake-submit").disabled = false;
+};
+
+// -------- IVR Simulate --------
+document.getElementById("btn-simulate").onclick = async () => {
+  const btn = document.getElementById("btn-simulate");
+  btn.disabled = true; btn.textContent = "Simulating...";
+  try {
+    const calls = await sendJSON("/calls/simulate?count=1", {}, "POST");
+    // flash notification
+    const toast = document.createElement("div");
+    toast.className = "alert alert-warning position-fixed top-0 end-0 m-3";
+    toast.style.zIndex = 9999;
+    toast.innerHTML = `📞 IVR Call: <b>${esc(calls[0]?.incident_type)}</b> – ${esc((calls[0]?.description||"").slice(0,60))}`;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+    loadAll();
+  } catch (e) { alert("Simulate failed: " + e.message); }
+  btn.disabled = false; btn.textContent = "🔊 Simulate IVR Call";
+};
+
+// -------- Filter --------
+document.getElementById("f-status").onchange = loadAll;
+
+// -------- Boot --------
+(async () => {
+  initMap();
+  try {
+    const h = await getJSON("/health");
+    mapCenter = h.map_center;
+    map.setView(mapCenter, 12);
+    document.getElementById("i-lat").placeholder = mapCenter[0];
+    document.getElementById("i-lng").placeholder = mapCenter[1];
+  } catch (_) {}
+  await loadAll();
+  setInterval(loadAll, 8000);   // live refresh every 8 s
+})();
+</script>
+</body>
+</html>
